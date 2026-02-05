@@ -1,38 +1,76 @@
-# app.py
+# ================================
+# Selective Machine Unlearning App
+# ================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 import matplotlib.pyplot as plt
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 
-from utils import (
-    clean_text,
-    train_model,
-    predict,
-    apply_forgetting_rule,
-    get_top_features,
-    confidence_overlap
-)
-
-# -------------------------------------------------
-# Page Setup
-# -------------------------------------------------
-st.set_page_config(
-    page_title="Selective Machine Unlearning",
-    layout="wide"
-)
-
+# --------------------------------
+# Page Config
+# --------------------------------
+st.set_page_config(page_title="Machine Unlearning", layout="wide")
 st.title("🔐 Selective Machine Unlearning Framework")
-st.caption("Unlearning • Verification • Explainability • Trust")
+st.caption("Unlearning • Verification • Forgetting • Explainability • Trust")
 
-st.divider()
+# --------------------------------
+# Helper Functions
+# --------------------------------
+def clean_text(text):
+    text = str(text).lower()
+    text = re.sub(r'[^a-z\s]', '', text)
+    return text
 
-# -------------------------------------------------
-# Dataset Upload
-# -------------------------------------------------
+def train_model(df, text_col, label_col):
+    tfidf = TfidfVectorizer(max_features=3000, stop_words="english")
+    X = tfidf.fit_transform(df[text_col])
+    y = df[label_col]
+
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X, y)
+
+    return model, tfidf
+
+def predict(model, tfidf, texts):
+    X = tfidf.transform(texts)
+    preds = model.predict(X)
+    probs = model.predict_proba(X)[:, 1]
+    return preds, probs
+
+def apply_forgetting(df, rule, user_col, users, text_col, label_col, keyword):
+    if rule == "User-based":
+        return df[~df[user_col].isin(users)]
+
+    if rule == "Label-based (Selective)":
+        return df[~((df[user_col].isin(users)) & (df[label_col] == 0))]
+
+    if rule == "Keyword-based":
+        return df[~((df[user_col].isin(users)) &
+                    (df[text_col].str.contains(keyword, na=False)))]
+
+    return df
+
+def get_top_words(model, tfidf, n=10):
+    words = np.array(tfidf.get_feature_names_out())
+    weights = model.coef_[0]
+    top = words[np.argsort(weights)[-n:]]
+    return list(top)
+
+def trust_score(before, after):
+    diff = np.abs(before[:len(after)] - after[:len(before)])
+    return round(1 - np.mean(diff), 3)
+
+# --------------------------------
+# Step 1: Upload Dataset
+# --------------------------------
 st.header("📂 Step 1: Upload Dataset")
-file = st.file_uploader("Upload CSV file", type=["csv"])
+file = st.file_uploader("Upload CSV", type=["csv"])
 
 if file:
     df = pd.read_csv(file)
@@ -40,177 +78,125 @@ if file:
 
     st.dataframe(df.head())
 
-    st.divider()
-
-    # -------------------------------------------------
-    # Column Selection
-    # -------------------------------------------------
+    # --------------------------------
+    # Step 2: Column Selection
+    # --------------------------------
     st.header("🧩 Step 2: Column Selection")
 
-    user_col = st.selectbox("User ID Column", df.columns)
-    text_col = st.selectbox("Text Column", df.columns)
-    label_col = st.selectbox("Label Column (0 / 1)", df.columns)
+    user_col = st.selectbox("User ID column", df.columns)
+    text_col = st.selectbox("Text column", df.columns)
+    label_col = st.selectbox("Label column (0/1)", df.columns)
 
     df = df[[user_col, text_col, label_col]].dropna()
     df["clean_text"] = df[text_col].apply(clean_text)
 
-    st.divider()
-
-    # -------------------------------------------------
-    # Forgetting Rule Selection
-    # -------------------------------------------------
+    # --------------------------------
+    # Step 3: Forgetting Rule
+    # --------------------------------
     st.header("🧠 Step 3: Forgetting Rule")
 
     rule = st.selectbox(
-        "Choose Forgetting Rule",
+        "Choose forgetting rule",
         ["User-based", "Label-based (Selective)", "Keyword-based"]
     )
 
-    target_users = st.multiselect(
-        "Select User(s) to Forget",
-        df[user_col].unique()
-    )
+    users = st.multiselect("Select user(s) to forget", df[user_col].unique())
 
-    keyword = None
+    keyword = ""
     if rule == "Keyword-based":
-        keyword = st.text_input("Keyword to Forget", value="bad")
+        keyword = st.text_input("Keyword to forget", value="bad")
 
-    st.divider()
-
-    # -------------------------------------------------
+    # --------------------------------
     # Run Unlearning
-    # -------------------------------------------------
+    # --------------------------------
     if st.button("🚀 Run Unlearning", use_container_width=True):
 
-        if not target_users:
-            st.warning("Select at least one user")
+        if not users:
+            st.warning("Please select at least one user")
             st.stop()
 
-        # ==============================
-        # Layer 1 + 2: Before Unlearning
-        # ==============================
-        model_before, tfidf_before = train_model(
-            df, "clean_text", label_col
-        )
+        # -------- BEFORE UNLEARNING (Layer 1 + 2)
+        model_before, tfidf_before = train_model(df, "clean_text", label_col)
 
-        user_data = df[df[user_col].isin(target_users)]
+        user_data = df[df[user_col].isin(users)]
 
-        preds_before, probs_before = predict(
-            model_before,
-            tfidf_before,
-            user_data["clean_text"]
+        preds_b, probs_b = predict(
+            model_before, tfidf_before, user_data["clean_text"]
         )
 
         acc_before = accuracy_score(
             df[label_col],
-            model_before.predict(
-                tfidf_before.transform(df["clean_text"])
-            )
+            model_before.predict(tfidf_before.transform(df["clean_text"]))
         )
 
-        # ==============================
-        # Layer 1: Apply Unlearning
-        # ==============================
-        df_after = apply_forgetting_rule(
-            df,
-            rule,
-            user_col,
-            target_users,
-            "clean_text",
-            label_col,
-            keyword
+        # -------- APPLY UNLEARNING (Layer 1)
+        df_after = apply_forgetting(
+            df, rule, user_col, users, "clean_text", label_col, keyword
         )
 
         if df_after.empty:
-            st.error("All data removed. Try different rule.")
+            st.error("All data removed. Try another rule.")
             st.stop()
 
-        # ==============================
-        # Layer 2: After Unlearning
-        # ==============================
-        model_after, tfidf_after = train_model(
-            df_after, "clean_text", label_col
-        )
+        # -------- AFTER UNLEARNING (Layer 2)
+        model_after, tfidf_after = train_model(df_after, "clean_text", label_col)
 
-        preds_after, probs_after = predict(
-            model_after,
-            tfidf_after,
-            user_data["clean_text"]
+        preds_a, probs_a = predict(
+            model_after, tfidf_after, user_data["clean_text"]
         )
 
         acc_after = accuracy_score(
             df_after[label_col],
-            model_after.predict(
-                tfidf_after.transform(df_after["clean_text"])
-            )
+            model_after.predict(tfidf_after.transform(df_after["clean_text"]))
         )
 
-        # ==============================
-        # Layer 3: Forgetting Score
-        # ==============================
-        pred_change = np.mean(preds_before != preds_after)
-        conf_change = np.mean(np.abs(probs_before - probs_after))
-        forgetting_score = 0.5 * pred_change + 0.5 * conf_change
+        # -------- Layer 3: Forgetting Score
+        pred_change = np.mean(preds_b != preds_a)
+        conf_change = np.mean(np.abs(probs_b - probs_a))
+        forgetting_score = round(0.5 * pred_change + 0.5 * conf_change, 3)
 
-        # ==============================
-        # Layer 4: Explainability
-        # ==============================
-        top_pos_before, top_neg_before = get_top_features(
-            model_before, tfidf_before
-        )
-        top_pos_after, top_neg_after = get_top_features(
-            model_after, tfidf_after
-        )
+        # -------- Layer 4: Explainability
+        top_before = get_top_words(model_before, tfidf_before)
+        top_after = get_top_words(model_after, tfidf_after)
 
-        # ==============================
-        # Layer 5: Trust / Re-ID Resistance
-        # ==============================
-        trust_score = confidence_overlap(
-            probs_before, probs_after
-        )
+        # -------- Layer 5: Trust / Re-ID
+        trust = trust_score(probs_b, probs_a)
 
-        # -------------------------------------------------
+        # --------------------------------
         # Results
-        # -------------------------------------------------
+        # --------------------------------
         st.divider()
         st.header("📊 Results")
 
-        # Accuracy Table
-        st.subheader("Model Accuracy")
+        st.subheader("Accuracy")
         st.table(pd.DataFrame({
-            "Stage": ["Before Unlearning", "After Unlearning"],
+            "Stage": ["Before", "After"],
             "Accuracy": [round(acc_before, 4), round(acc_after, 4)]
         }))
 
-        # Scores
         c1, c2 = st.columns(2)
-        c1.metric("Forgetting Score", round(forgetting_score, 3))
-        c2.metric("Trust / Privacy Score", round(trust_score, 3))
+        c1.metric("Forgetting Score", forgetting_score)
+        c2.metric("Trust Score", trust)
 
-        # Explainability
-        st.subheader("Explainability (Feature-Level)")
+        st.subheader("Explainability (Top Words)")
         col1, col2 = st.columns(2)
+        col1.write("Before Unlearning")
+        col1.write(top_before)
+        col2.write("After Unlearning")
+        col2.write(top_after)
 
-        col1.write("Top Positive Words (Before)")
-        col1.write(list(top_pos_before))
-
-        col2.write("Top Positive Words (After)")
-        col2.write(list(top_pos_after))
-
-        # Verification Plots
-        st.subheader("Behavioral Verification")
-
+        st.subheader("Verification (Predictions)")
         st.line_chart(pd.DataFrame({
-            "Prediction Before": preds_before,
-            "Prediction After": preds_after
+            "Before": preds_b,
+            "After": preds_a
         }))
 
+        st.subheader("Confidence Change")
         st.line_chart(pd.DataFrame({
-            "Confidence Before": probs_before,
-            "Confidence After": probs_after
+            "Before": probs_b,
+            "After": probs_a
         }))
 
-        # Summary
         st.subheader("Unlearning Summary")
         st.table(pd.DataFrame({
             "Metric": ["Total Samples", "Remaining Samples", "Forgotten Samples"],
