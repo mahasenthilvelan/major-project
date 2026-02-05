@@ -2,28 +2,28 @@
 
 import re
 import numpy as np
+import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 
-# --------------------------------------------------
+# -------------------------------------------------
 # Text Cleaning
-# --------------------------------------------------
+# -------------------------------------------------
 def clean_text(text):
     text = str(text).lower()
     text = re.sub(r'[^a-z\s]', '', text)
     return text
 
 
-# --------------------------------------------------
-# Train Model
-# --------------------------------------------------
+# -------------------------------------------------
+# Train Logistic Regression Model
+# -------------------------------------------------
 def train_model(df, text_col, label_col):
     tfidf = TfidfVectorizer(
         max_features=4000,
         stop_words="english"
     )
-
     X = tfidf.fit_transform(df[text_col])
     y = df[label_col]
 
@@ -33,9 +33,9 @@ def train_model(df, text_col, label_col):
     return model, tfidf
 
 
-# --------------------------------------------------
-# Predict
-# --------------------------------------------------
+# -------------------------------------------------
+# Predict Labels & Confidence
+# -------------------------------------------------
 def predict(model, tfidf, texts):
     X = tfidf.transform(texts)
     preds = model.predict(X)
@@ -43,9 +43,9 @@ def predict(model, tfidf, texts):
     return preds, probs
 
 
-# --------------------------------------------------
-# Rule-Based Forgetting (NO hardcoded columns)
-# --------------------------------------------------
+# -------------------------------------------------
+# Layer 1: Unlearning Engine (Rule-based)
+# -------------------------------------------------
 def apply_forgetting_rule(
     df,
     rule,
@@ -55,18 +55,15 @@ def apply_forgetting_rule(
     label_col=None,
     keyword=None
 ):
-    # User-based: remove ALL data of selected users
     if rule == "User-based":
         return df[~df[user_col].isin(target_users)]
 
-    # Label-based (Selective): remove ONLY matching label rows of selected users
     if rule == "Label-based (Selective)":
         return df[~(
             (df[user_col].isin(target_users)) &
             (df[label_col] == 0)
         )]
 
-    # Keyword-based: remove ONLY rows containing keyword for selected users
     if rule == "Keyword-based":
         return df[~(
             (df[user_col].isin(target_users)) &
@@ -74,3 +71,28 @@ def apply_forgetting_rule(
         )]
 
     return df
+
+
+# -------------------------------------------------
+# Layer 4: Explainability
+# Feature importance extraction
+# -------------------------------------------------
+def get_top_features(model, tfidf, top_n=10):
+    feature_names = np.array(tfidf.get_feature_names_out())
+    coefficients = model.coef_[0]
+
+    top_positive = feature_names[np.argsort(coefficients)[-top_n:]]
+    top_negative = feature_names[np.argsort(coefficients)[:top_n]]
+
+    return top_positive, top_negative
+
+
+# -------------------------------------------------
+# Layer 5: Trust / Re-identification Resistance
+# Confidence overlap score
+# -------------------------------------------------
+def confidence_overlap(before_probs, after_probs):
+    min_len = min(len(before_probs), len(after_probs))
+    diff = np.abs(before_probs[:min_len] - after_probs[:min_len])
+    overlap_score = 1 - np.mean(diff)
+    return max(0, min(overlap_score, 1))
